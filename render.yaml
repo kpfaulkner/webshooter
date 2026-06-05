@@ -1,0 +1,17 @@
+# Render.com blueprint (free tier, no credit card required).
+#
+# The game keeps state in memory in a single process, so it must run as ONE
+# instance — the free plan is single-instance, which suits this. Free services
+# sleep after ~15 min idle and cold-start on the next request.
+services:
+  - type: web
+    name: webshooter
+    runtime: docker        # builds from ./Dockerfile
+    plan: free
+    healthCheckPath: /
+    autoDeploy: true       # redeploy on push to the connected branch
+    envVars:
+      # Set this in the Render dashboard once you know your URL, e.g.
+      # https://webshooter.onrender.com — restricts who can open a WebSocket.
+      - key: ALLOWED_ORIGIN
+        sync: false

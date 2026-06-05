@@ -1,0 +1,7 @@
+.git
+.idea
+*.md
+Dockerfile
+.dockerignore
+fly.toml
+render.yaml

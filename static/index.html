@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Webshooter</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #11131a; color: #cdd; font-family: system-ui, sans-serif; }
+    #wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; }
+    canvas { background: #1b1f2a; border: 1px solid #333; border-radius: 4px; cursor: pointer; }
+    #hint { font-size: 13px; color: #889; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game"></canvas>
+    <div id="hint">click to lock mouse · move mouse to turn · W/S forward/back · A/D strafe · click or space to shoot · Esc to release</div>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>

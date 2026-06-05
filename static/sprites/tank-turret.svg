@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Tank turret + barrel, pivoting at the sprite center (32,32), barrel +x. -->
+  <defs>
+    <radialGradient id="turret" cx="0.38" cy="0.36" r="0.7">
+      <stop offset="0" stop-color="#ececec"/>
+      <stop offset="1" stop-color="#9b9b9b"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Barrel. -->
+  <rect x="32" y="29" width="28" height="6" rx="2" fill="#7c7c7c" stroke="#565656" stroke-width="1"/>
+  <!-- Muzzle brake. -->
+  <rect x="56" y="27" width="6" height="10" rx="1.5" fill="#6a6a6a" stroke="#4d4d4d" stroke-width="1"/>
+
+  <!-- Turret base (rotation pivot). -->
+  <circle cx="32" cy="32" r="13" fill="url(#turret)" stroke="#787878" stroke-width="1.5"/>
+  <!-- Hatch. -->
+  <circle cx="27" cy="32" r="4.5" fill="#bcbcbc" stroke="#8c8c8c" stroke-width="1"/>
+  <!-- Highlight glint. -->
+  <circle cx="28" cy="28" r="1.6" fill="#f2f2f2"/>
+</svg>
