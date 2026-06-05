@@ -279,6 +279,7 @@ function onState(msg) {
     winner: msg.winner,
     timeLeft: msg.timeLeft,
     resetIn: msg.resetIn,
+    pickup: msg.pickup || null, // ricochet collectible, when on the field
   });
   while (snapshots.length > 2 && snapshots[0].t < performance.now() - 1000) {
     snapshots.shift();
@@ -458,6 +459,7 @@ function remotesFrom(target, prev, a) {
       aim: p1.aim,
       score: p1.score,
       alive: p1.alive,
+      bounce: p1.bounce,
     });
   }
   return out;
@@ -470,22 +472,29 @@ function latest() {
 // --- rendering ---
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawGrid();
+  drawTerrain();
   drawObstacles();
 
   const snap = latest();
 
-  // Bullets: a hot core with a soft glow.
+  // The ricochet pickup sits on the field until someone grabs it.
+  if (snap && snap.pickup) drawPickup(snap.pickup.pos);
+
+  // Bullets: a hot core with a soft glow. Ricochet rounds glow electric cyan
+  // so they read as "these bounce" at a glance.
   for (const b of (snap ? snap.bullets : [])) {
+    const glow = b.bounce
+      ? ["rgba(160, 240, 255, 0.95)", "rgba(76, 201, 240, 0.55)", "rgba(76, 201, 240, 0)"]
+      : ["rgba(255, 233, 150, 0.95)", "rgba(255, 209, 102, 0.55)", "rgba(255, 209, 102, 0)"];
     const g = ctx.createRadialGradient(b.pos.x, b.pos.y, 0, b.pos.x, b.pos.y, 9);
-    g.addColorStop(0, "rgba(255, 233, 150, 0.95)");
-    g.addColorStop(0.4, "rgba(255, 209, 102, 0.55)");
-    g.addColorStop(1, "rgba(255, 209, 102, 0)");
+    g.addColorStop(0, glow[0]);
+    g.addColorStop(0.4, glow[1]);
+    g.addColorStop(1, glow[2]);
     ctx.fillStyle = g;
     ctx.beginPath();
     ctx.arc(b.pos.x, b.pos.y, 9, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = "#fff6da";
+    ctx.fillStyle = b.bounce ? "#eaffff" : "#fff6da";
     ctx.beginPath();
     ctx.arc(b.pos.x, b.pos.y, 2.5, 0, Math.PI * 2);
     ctx.fill();
@@ -493,6 +502,7 @@ function draw() {
 
   // Remote players, interpolated.
   for (const p of interpolatedRemotes()) {
+    if (p.alive && p.bounce > 0) drawBounceAura(p.pos);
     drawPlayer(p.pos, p.aim, p.alive, "#ef476f", false, p.id);
   }
 
@@ -501,6 +511,7 @@ function draw() {
     const me = snap.players[myID];
     const alive = me ? me.alive : true;
     const aim = { x: Math.cos(heading), y: Math.sin(heading) };
+    if (alive && me && me.bounce > 0) drawBounceAura(predicted);
     drawPlayer(predicted, aim, alive, "#4cc9f0", true, myID);
   }
 
@@ -763,14 +774,164 @@ function brickShade(x, y) {
   return BRICK_SHADES[h % BRICK_SHADES.length];
 }
 
-function drawGrid() {
+// --- terrain ---
+// A procedurally generated ground texture: broad, organic patches of grass,
+// dirt and concrete with per-pixel grain so it reads as a real surface. It only
+// depends on the canvas size, so we render it once into an offscreen canvas and
+// blit that each frame (regenerating only if the canvas is resized).
+let terrain = null; // { w, h, canvas }
+
+// Deterministic [0,1) hash of two integers (plus a seed) — the basis for our
+// value noise and grain so the terrain is stable frame to frame.
+function hash2(x, y, seed) {
+  let n = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 982451653);
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+
+// Smooth (bilinear, smoothstepped) value noise on a unit lattice.
+function vnoise(x, y, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const aa = hash2(xi, yi, seed), ba = hash2(xi + 1, yi, seed);
+  const ab = hash2(xi, yi + 1, seed), bb = hash2(xi + 1, yi + 1, seed);
+  return lerp(lerp(aa, ba, u), lerp(ab, bb, u), v);
+}
+
+// Fractal value noise (a few octaves), normalized to ~[0,1].
+function fbm(x, y, seed) {
+  let v = 0, amp = 0.5, freq = 1;
+  for (let o = 0; o < 3; o++) { v += amp * vnoise(x * freq, y * freq, seed + o * 101); freq *= 2; amp *= 0.5; }
+  return v / 0.875;
+}
+
+function buildTerrain(w, h) {
+  const off = document.createElement("canvas");
+  off.width = w;
+  off.height = h;
+  const x = off.getContext("2d");
+  const img = x.createImageData(w, h);
+  const data = img.data;
+
+  // Region size of the patches, in pixels (smaller => more frequent patches).
+  const PATCH = 150;
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      // Two independent noise fields cluster the surface into patches: the
+      // first carves out grass, the second splits the rest into dirt/concrete.
+      const a = fbm(px / PATCH, py / PATCH, 1);
+      const b = fbm(px / (PATCH * 0.8), py / (PATCH * 0.8), 7);
+      const grain = hash2(px, py, 7) - 0.5; // fine per-pixel speckle
+
+      let r, g, bl;
+      if (a > 0.56) {
+        // Grass: mossy green with lighter blades and darker tufts.
+        const blade = hash2(px, py, 31);
+        const tuft = blade > 0.86 ? 26 : blade < 0.14 ? -20 : 0;
+        r = 48 + tuft * 0.6 + grain * 14;
+        g = 86 + tuft + grain * 20;
+        bl = 40 + tuft * 0.5 + grain * 12;
+      } else if (b > 0.5) {
+        // Dirt: warm brown with scattered clods and pebbles.
+        const clod = hash2(px, py, 53);
+        const d = clod > 0.82 ? 22 : clod < 0.18 ? -18 : 0;
+        r = 98 + d + grain * 18;
+        g = 72 + d * 0.8 + grain * 13;
+        bl = 50 + d * 0.5 + grain * 9;
+      } else {
+        // Concrete: cool grey with light flecks and dark pits.
+        const fleck = hash2(px, py, 71);
+        const c = fleck > 0.9 ? 24 : fleck < 0.08 ? -22 : 0;
+        r = 108 + c + grain * 11;
+        g = 110 + c + grain * 11;
+        bl = 116 + c + grain * 11;
+      }
+      const i = (py * w + px) * 4;
+      data[i] = clamp(r, 0, 255);
+      data[i + 1] = clamp(g, 0, 255);
+      data[i + 2] = clamp(bl, 0, 255);
+      data[i + 3] = 255;
+    }
+  }
+  x.putImageData(img, 0, 0);
+
+  // A faint grid keeps movement readable on top of the busy texture.
+  x.strokeStyle = "rgba(0, 0, 0, 0.12)";
+  x.lineWidth = 1;
+  x.beginPath();
   const step = 64;
-  ctx.strokeStyle = "#262b38";
-  ctx.lineWidth = 1;
+  for (let gx = 0; gx <= w; gx += step) { x.moveTo(gx, 0); x.lineTo(gx, h); }
+  for (let gy = 0; gy <= h; gy += step) { x.moveTo(0, gy); x.lineTo(w, gy); }
+  x.stroke();
+
+  return { w, h, canvas: off };
+}
+
+function drawTerrain() {
+  if (!terrain || terrain.w !== canvas.width || terrain.h !== canvas.height) {
+    terrain = buildTerrain(canvas.width, canvas.height);
+  }
+  ctx.drawImage(terrain.canvas, 0, 0);
+}
+
+// --- ricochet power-up visuals ---
+
+// drawPickup renders the collectible: a pulsing cyan orb with a rotating
+// chevron ring, so it reads as "grab me for bouncing shots".
+function drawPickup(pos) {
+  const t = performance.now() / 1000;
+  const pulse = 0.5 + 0.5 * Math.sin(t * 4);
+  const r = 12;
+
+  ctx.save();
+  ctx.translate(pos.x, pos.y);
+
+  // Soft glow halo.
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r + 10 + pulse * 4);
+  g.addColorStop(0, "rgba(160, 240, 255, 0.55)");
+  g.addColorStop(1, "rgba(76, 201, 240, 0)");
+  ctx.fillStyle = g;
   ctx.beginPath();
-  for (let x = 0; x <= canvas.width; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); }
-  for (let y = 0; y <= canvas.height; y += step) { ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); }
+  ctx.arc(0, 0, r + 10 + pulse * 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Rotating ricochet ring (a few arrow-like ticks around the orb).
+  ctx.rotate(t * 1.5);
+  ctx.strokeStyle = "rgba(234, 255, 255, 0.9)";
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 4; i++) {
+    ctx.rotate(Math.PI / 2);
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 4, -0.4, 0.4);
+    ctx.stroke();
+  }
+
+  // Core orb.
+  ctx.rotate(-t * 1.5);
+  ctx.fillStyle = "#4cc9f0";
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#eaffff";
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// drawBounceAura rings a player who is currently armed with ricochet shots.
+function drawBounceAura(pos) {
+  const t = performance.now() / 1000;
+  ctx.save();
+  ctx.globalAlpha = 0.6 + 0.3 * Math.sin(t * 6);
+  ctx.strokeStyle = "#4cc9f0";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(pos.x, pos.y, cfg.radius + 6, 0, Math.PI * 2);
   ctx.stroke();
+  ctx.restore();
 }
 
 function drawScores(snap) {
@@ -785,6 +946,13 @@ function drawScores(snap) {
     ctx.fillStyle = p.id === myID ? "#4cc9f0" : "#cdd";
     ctx.fillText(`${p.id === myID ? "you" : "player " + p.id}: ${p.score}`, 12, y);
     y += 18;
+  }
+
+  // Show our remaining ricochet shots while the power-up is active.
+  const me = snap.players[myID];
+  if (me && me.bounce > 0) {
+    ctx.fillStyle = "#4cc9f0";
+    ctx.fillText(`ricochet shots: ${me.bounce}`, 12, y + 6);
   }
 }
 

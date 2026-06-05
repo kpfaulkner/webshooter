@@ -33,6 +33,13 @@ const (
 	winScore        = 10
 	roundDuration   = 120.0
 	matchResetDelay = 5.0
+
+	// When no kill happens for noKillPickupDelay seconds, a ricochet pickup
+	// spawns. Collecting it makes the player's next bounceShotCount shots bounce
+	// off walls and obstacles instead of being absorbed.
+	noKillPickupDelay = 30.0
+	pickupRadius      = 12.0
+	bounceShotCount   = 5
 )
 
 // Match phases.
@@ -94,14 +101,22 @@ type player struct {
 	fireTimer    float64 // seconds until next shot allowed
 	respawnTimer float64 // seconds until respawn while dead
 	deathPos     vec     // where we last died, so respawn can stay clear of it
+	bounceShots  int     // remaining shots that ricochet (from the pickup)
 }
 
 type bullet struct {
-	id    int
-	owner string
-	pos   vec
-	vel   vec
-	life  float64
+	id     int
+	owner  string
+	pos    vec
+	vel    vec
+	life   float64
+	bounce bool // ricochets off walls/obstacles instead of being absorbed
+}
+
+// pickup is the single collectible on the field. There is at most one at a
+// time; collecting it grants the ricochet power-up.
+type pickup struct {
+	pos vec
 }
 
 // game holds the authoritative world state. It is owned by the hub goroutine,
@@ -121,6 +136,12 @@ type game struct {
 	levelIndex int      // index of the active level
 	obstacles  []rect   // == levels[levelIndex]; the active layout
 	levelDirty bool     // set when the level changes so the hub rebroadcasts it
+
+	// timeSinceKill counts seconds since the last frag; when it crosses
+	// noKillPickupDelay (and none is on the field) a ricochet pickup spawns to
+	// break the stalemate. pickup is nil when there is none to collect.
+	timeSinceKill float64
+	pickup        *pickup
 }
 
 // newGame builds a game over the given level playlist. Empty levels fall back
@@ -256,6 +277,33 @@ func (g *game) update(dt float64) {
 		}
 	}
 	g.updateBullets(dt)
+	g.updatePickup(dt)
+}
+
+// updatePickup ticks the no-kill timer, spawning a ricochet pickup once the
+// field has gone quiet for long enough, and hands it to the first living player
+// who touches it.
+func (g *game) updatePickup(dt float64) {
+	if g.pickup == nil {
+		g.timeSinceKill += dt
+		if g.timeSinceKill >= noKillPickupDelay {
+			g.spawnPickup()
+		}
+		return
+	}
+	for _, p := range g.players {
+		if p.alive && dist(p.pos, g.pickup.pos) <= playerRadius+pickupRadius {
+			p.bounceShots = bounceShotCount
+			g.pickup = nil
+			g.timeSinceKill = 0 // restart the countdown to the next one
+			break
+		}
+	}
+}
+
+// spawnPickup places the single ricochet pickup at an obstacle-clear spot.
+func (g *game) spawnPickup() {
+	g.pickup = &pickup{pos: g.randomSpawn()}
 }
 
 // endMatch freezes play and starts the inter-round countdown.
@@ -276,11 +324,14 @@ func (g *game) resetMatch() {
 		p.pos = g.randomSpawn()
 		p.fireTimer = 0
 		p.respawnTimer = 0
+		p.bounceShots = 0
 	}
 	g.bullets = nil
 	g.winnerID = ""
 	g.roundTimer = roundDuration
 	g.phase = phasePlaying
+	g.pickup = nil
+	g.timeSinceKill = 0
 }
 
 // advanceLevel moves to the next level in the playlist, cycling back to the
@@ -316,13 +367,19 @@ func (g *game) leader() string {
 
 func (g *game) spawnBullet(p *player) {
 	g.nextBullet++
-	g.bullets = append(g.bullets, &bullet{
+	b := &bullet{
 		id:    g.nextBullet,
 		owner: p.id,
 		pos:   vec{X: p.pos.X + p.aim.X*playerRadius, Y: p.pos.Y + p.aim.Y*playerRadius},
 		vel:   vec{X: p.aim.X * bulletSpeed, Y: p.aim.Y * bulletSpeed},
 		life:  bulletLife,
-	})
+	}
+	// Spend a ricochet charge if the player has one from the pickup.
+	if p.bounceShots > 0 {
+		b.bounce = true
+		p.bounceShots--
+	}
+	g.bullets = append(g.bullets, b)
 }
 
 func (g *game) updateBullets(dt float64) {
@@ -332,12 +389,21 @@ func (g *game) updateBullets(dt float64) {
 		b.pos.Y += b.vel.Y * dt
 		b.life -= dt
 
-		if b.life <= 0 || b.pos.X < 0 || b.pos.X > worldWidth || b.pos.Y < 0 || b.pos.Y > worldHeight {
+		if b.life <= 0 {
 			continue
 		}
 
-		if g.hitsObstacle(b.pos, bulletRadius) {
-			continue // wall blocks the shot
+		if b.bounce {
+			// Ricochet shots reflect off the world edges and obstacles rather
+			// than being removed, so they stay in play until their life runs out.
+			g.bounceBullet(b, dt)
+		} else {
+			if b.pos.X < 0 || b.pos.X > worldWidth || b.pos.Y < 0 || b.pos.Y > worldHeight {
+				continue
+			}
+			if g.hitsObstacle(b.pos, bulletRadius) {
+				continue // wall blocks the shot
+			}
 		}
 
 		if g.checkHit(b) {
@@ -346,6 +412,71 @@ func (g *game) updateBullets(dt float64) {
 		kept = append(kept, b)
 	}
 	g.bullets = kept
+}
+
+// bounceBullet reflects a ricochet bullet off the world boundary and any
+// obstacle it has entered this tick, snapping it back to the surface and
+// flipping the velocity component normal to the face it crossed. Used only for
+// bounce==true bullets. dt is the step just integrated, so we can recover the
+// pre-move position and pick the correct face even when a fast bullet tunnels
+// deep into a thin wall in one tick.
+func (g *game) bounceBullet(b *bullet, dt float64) {
+	// World edges: clamp back in bounds and flip the perpendicular component.
+	if b.pos.X < bulletRadius {
+		b.pos.X = bulletRadius
+		b.vel.X = math.Abs(b.vel.X)
+	} else if b.pos.X > worldWidth-bulletRadius {
+		b.pos.X = worldWidth - bulletRadius
+		b.vel.X = -math.Abs(b.vel.X)
+	}
+	if b.pos.Y < bulletRadius {
+		b.pos.Y = bulletRadius
+		b.vel.Y = math.Abs(b.vel.Y)
+	} else if b.pos.Y > worldHeight-bulletRadius {
+		b.pos.Y = worldHeight - bulletRadius
+		b.vel.Y = -math.Abs(b.vel.Y)
+	}
+
+	// Position before this tick's move, used to tell which face we came through.
+	prevX, prevY := b.pos.X-b.vel.X*dt, b.pos.Y-b.vel.Y*dt
+
+	for _, o := range g.obstacles {
+		// Treat the obstacle as an AABB grown by the bullet radius so we can work
+		// with the bullet center alone.
+		exMinX, exMaxX := o.X-bulletRadius, o.X+o.W+bulletRadius
+		exMinY, exMaxY := o.Y-bulletRadius, o.Y+o.H+bulletRadius
+		if b.pos.X <= exMinX || b.pos.X >= exMaxX || b.pos.Y <= exMinY || b.pos.Y >= exMaxY {
+			continue // center not inside the expanded rect: no contact
+		}
+
+		// Which axis was the bullet outside on before it moved? That's the face it
+		// entered through. If neither (or both) are decisive, fall back to ejecting
+		// along whichever axis it's shallower in.
+		outX := prevX <= exMinX || prevX >= exMaxX
+		outY := prevY <= exMinY || prevY >= exMaxY
+		if outX == outY {
+			pushX := math.Min(b.pos.X-exMinX, exMaxX-b.pos.X)
+			pushY := math.Min(b.pos.Y-exMinY, exMaxY-b.pos.Y)
+			outX = pushX <= pushY
+			outY = !outX
+		}
+
+		if outX {
+			if b.vel.X > 0 {
+				b.pos.X = exMinX
+			} else {
+				b.pos.X = exMaxX
+			}
+			b.vel.X = -b.vel.X
+		} else {
+			if b.vel.Y > 0 {
+				b.pos.Y = exMinY
+			} else {
+				b.pos.Y = exMaxY
+			}
+			b.vel.Y = -b.vel.Y
+		}
+	}
 }
 
 // checkHit returns true if the bullet struck a player (and applies the score
@@ -359,6 +490,7 @@ func (g *game) checkHit(b *bullet) bool {
 			p.alive = false
 			p.respawnTimer = respawnDelay
 			p.deathPos = p.pos
+			g.timeSinceKill = 0 // a frag resets the no-kill pickup countdown
 			if shooter, ok := g.players[b.owner]; ok {
 				shooter.score++
 				if shooter.score >= winScore {

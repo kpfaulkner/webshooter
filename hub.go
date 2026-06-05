@@ -103,10 +103,20 @@ type playerView struct {
 	// Seq is the last input sequence the server processed for this player; the
 	// owning client uses it to discard acknowledged inputs during reconciliation.
 	Seq int `json:"seq"`
+	// Bounce is the player's remaining ricochet shots (0 = none); clients use it
+	// to draw a power-up aura.
+	Bounce int `json:"bounce"`
 }
 
 type bulletView struct {
-	ID  int `json:"id"`
+	ID     int  `json:"id"`
+	Pos    vec  `json:"pos"`
+	Bounce bool `json:"bounce"` // rendered distinctly as a ricochet round
+}
+
+// pickupView is the collectible's position, sent only while one is on the
+// field (nil/omitted otherwise).
+type pickupView struct {
 	Pos vec `json:"pos"`
 }
 
@@ -121,6 +131,9 @@ type stateMsg struct {
 	Winner   string  `json:"winner"`
 	TimeLeft float64 `json:"timeLeft"`
 	ResetIn  float64 `json:"resetIn"`
+	// Pickup is the ricochet collectible currently on the field, or omitted when
+	// there is none.
+	Pickup *pickupView `json:"pickup,omitempty"`
 }
 
 func (h *Hub) sendInit(c *Client) {
@@ -165,9 +178,9 @@ func (h *Hub) broadcast() {
 	// Non-nil slices so they marshal to [] rather than null (null is not
 	// iterable on the client and would break rendering).
 	state := stateMsg{
-		Type:    "state",
-		Players: []playerView{},
-		Bullets: []bulletView{},
+		Type:     "state",
+		Players:  []playerView{},
+		Bullets:  []bulletView{},
 		Phase:    h.game.phase,
 		Winner:   h.game.winnerID,
 		TimeLeft: h.game.roundTimer,
@@ -175,16 +188,20 @@ func (h *Hub) broadcast() {
 	}
 	for _, p := range h.game.players {
 		state.Players = append(state.Players, playerView{
-			ID:    p.id,
-			Pos:   p.pos,
-			Aim:   p.aim,
-			Score: p.score,
-			Alive: p.alive,
-			Seq:   p.lastSeq,
+			ID:     p.id,
+			Pos:    p.pos,
+			Aim:    p.aim,
+			Score:  p.score,
+			Alive:  p.alive,
+			Seq:    p.lastSeq,
+			Bounce: p.bounceShots,
 		})
 	}
 	for _, b := range h.game.bullets {
-		state.Bullets = append(state.Bullets, bulletView{ID: b.id, Pos: b.pos})
+		state.Bullets = append(state.Bullets, bulletView{ID: b.id, Pos: b.pos, Bounce: b.bounce})
+	}
+	if h.game.pickup != nil {
+		state.Pickup = &pickupView{Pos: h.game.pickup.pos}
 	}
 
 	data, err := json.Marshal(state)

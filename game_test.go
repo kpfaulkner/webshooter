@@ -181,6 +181,105 @@ func TestBulletBlockedByObstacle(t *testing.T) {
 	}
 }
 
+func TestPickupSpawnsAfterQuietPeriod(t *testing.T) {
+	g := newGame(nil, nil)
+	g.addPlayer("a")
+
+	// Just shy of the threshold: no pickup yet.
+	g.update(noKillPickupDelay - 1)
+	if g.pickup != nil {
+		t.Fatalf("pickup spawned too early (%.0fs in)", noKillPickupDelay-1)
+	}
+
+	// Cross the threshold: a pickup appears, clear of obstacles.
+	g.update(2)
+	if g.pickup == nil {
+		t.Fatal("no pickup after the quiet period elapsed")
+	}
+	if g.hitsObstacle(g.pickup.pos, pickupRadius) {
+		t.Fatalf("pickup spawned inside an obstacle at %+v", g.pickup.pos)
+	}
+}
+
+func TestFragResetsPickupTimer(t *testing.T) {
+	g := newGame(nil, nil)
+	g.addPlayer("a")
+	g.addPlayer("b")
+
+	g.update(noKillPickupDelay - 2) // build up most of the way
+	fragVictim(g, g.players["a"], g.players["b"])
+	if g.timeSinceKill != 0 {
+		t.Fatalf("frag did not reset the no-kill timer: %v", g.timeSinceKill)
+	}
+	g.update(3) // would have spawned had the timer not reset
+	if g.pickup != nil {
+		t.Fatal("pickup spawned despite a recent frag resetting the timer")
+	}
+}
+
+func TestCollectingPickupGrantsBounceShots(t *testing.T) {
+	g := newGame(nil, nil)
+	g.addPlayer("a")
+	p := g.players["a"]
+	p.pos = vec{X: 500, Y: 500}
+	g.pickup = &pickup{pos: p.pos} // drop it right on the player
+
+	g.update(0.02)
+
+	if g.pickup != nil {
+		t.Fatal("pickup not consumed on contact")
+	}
+	if p.bounceShots != bounceShotCount {
+		t.Fatalf("bounceShots = %d, want %d", p.bounceShots, bounceShotCount)
+	}
+	if g.timeSinceKill != 0 {
+		t.Fatalf("collecting should restart the countdown, got %v", g.timeSinceKill)
+	}
+}
+
+func TestBounceShotsAreConsumedAndFlagged(t *testing.T) {
+	g := newGame(nil, nil)
+	g.addPlayer("a")
+	p := g.players["a"]
+	p.pos = vec{X: 500, Y: 500}
+	p.aim = vec{X: 1, Y: 0}
+	p.bounceShots = 1
+
+	g.spawnBullet(p)
+	if p.bounceShots != 0 {
+		t.Fatalf("bounce charge not spent: %d left", p.bounceShots)
+	}
+	if !g.bullets[0].bounce {
+		t.Fatal("first shot after pickup was not flagged as a ricochet")
+	}
+
+	// The next shot (no charges left) is an ordinary, non-bouncing round.
+	g.spawnBullet(p)
+	if g.bullets[1].bounce {
+		t.Fatal("shot fired with no charges should not ricochet")
+	}
+}
+
+func TestBounceBulletReflectsOffObstacle(t *testing.T) {
+	g := newGame(nil, nil)
+	o := g.obstacles[0]
+	g.bullets = []*bullet{{
+		owner:  "x",
+		pos:    vec{X: o.X - 5, Y: o.Y + o.H/2},
+		vel:    vec{X: bulletSpeed, Y: 0}, // flying into the wall
+		life:   bulletLife,
+		bounce: true,
+	}}
+	g.updateBullets(0.05)
+
+	if len(g.bullets) != 1 {
+		t.Fatalf("ricochet bullet should survive the wall, %d remain", len(g.bullets))
+	}
+	if g.bullets[0].vel.X >= 0 {
+		t.Fatalf("ricochet bullet did not reverse off the wall: vx=%v", g.bullets[0].vel.X)
+	}
+}
+
 func TestForwardMovesTowardAim(t *testing.T) {
 	g := newGame(nil, nil)
 	g.addPlayer("a")
