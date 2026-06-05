@@ -49,12 +49,21 @@ type Client struct {
 	id   string
 }
 
-func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+func serveWs(mgr *Manager, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrade: %v", err)
 		return
 	}
+
+	// The room is chosen by the ?password= query param: everyone using the same
+	// password lands in the same game. Cap the length so a client can't spawn an
+	// arbitrarily large registry key.
+	password := r.URL.Query().Get("password")
+	if len(password) > 64 {
+		password = password[:64]
+	}
+	hub := mgr.acquire(password)
 
 	id := strconv.FormatInt(atomic.AddInt64(&nextClientID, 1), 10)
 	c := &Client{
@@ -63,7 +72,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		send: make(chan []byte, 32),
 		id:   id,
 	}
-	hub.register <- c
+	hub.register <- c // hub stays alive until this registers (guarded by pending)
 
 	go c.writePump()
 	go c.readPump()

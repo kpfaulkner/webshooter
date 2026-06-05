@@ -26,6 +26,12 @@ let level = { num: 1, count: 1, name: "" };
 let myID = null;
 let ws = null;
 
+// The room password the player entered at the join gate. Everyone using the
+// same password shares a game. joined flips true once the gate is dismissed,
+// gating gameplay input until then.
+let gamePassword = "";
+let joined = false;
+
 // --- tank sprites ---
 // Grayscale hull + turret SVGs, tinted per team color at load time. If they
 // fail to load, drawPlayer falls back to procedural drawing.
@@ -212,7 +218,8 @@ const TURN_SENSITIVITY = 0.0028; // radians per pixel of mouse movement
 // --- networking ---
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  // The password routes us to a room server-side; players sharing it play together.
+  ws = new WebSocket(`${proto}://${location.host}/ws?password=${encodeURIComponent(gamePassword)}`);
 
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
@@ -393,10 +400,12 @@ const keyMap = {
 };
 
 window.addEventListener("keydown", (e) => {
+  if (!joined) return; // let the join gate's password field receive keystrokes
   if (keyMap[e.code]) { keys[keyMap[e.code]] = true; e.preventDefault(); }
   if (e.code === "Space") { keys.fire = true; e.preventDefault(); }
 });
 window.addEventListener("keyup", (e) => {
+  if (!joined) return;
   if (keyMap[e.code]) { keys[keyMap[e.code]] = false; e.preventDefault(); }
   if (e.code === "Space") { keys.fire = false; e.preventDefault(); }
 });
@@ -960,6 +969,23 @@ function drawScores(snap) {
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 function lerp(a, b, t) { return a + (b - a) * t; }
 
-connect();
+// --- join gate ---
+// On load the player enters a game password; we connect only once they do.
+// Everyone who joins with the same password ends up in the same game.
+const gate = document.getElementById("gate");
+const gateForm = document.getElementById("gateForm");
+const passwordInput = document.getElementById("password");
+gateForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const pw = passwordInput.value.trim();
+  if (!pw) return; // require a password
+  gamePassword = pw;
+  joined = true;
+  gate.classList.add("hidden");
+  connect();
+});
+
+// The input/render loops run from the start; they're inert (no predicted
+// position, no snapshots) until we connect, so it's safe to start them now.
 setInterval(inputTick, 1000 / INPUT_HZ);
 requestAnimationFrame(draw);

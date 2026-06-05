@@ -24,12 +24,13 @@ func main() {
 		log.Printf("levels: loaded %d from %s (%v)", len(levels), *levelsDir, names)
 	}
 
-	hub := newHub(levels, names)
-	go hub.run()
+	// One Manager owns every room; each distinct password gets its own game,
+	// created on demand when its first player connects.
+	mgr := newManager(levels, names)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(hub, w, r)
+		serveWs(mgr, w, r)
 	})
 	// Serve client assets with no-store so the browser never runs a stale
 	// game.js/index.html during development.

@@ -11,14 +11,23 @@ type inputMsg struct {
 	in input
 }
 
-// Hub is the single owner of the game state. All mutation happens inside run,
-// driven by channels, so the game needs no locks.
+// Hub is the single owner of one room's game state. All mutation happens inside
+// run, driven by channels, so the game needs no locks.
 type Hub struct {
 	clients    map[*Client]bool
 	register   chan *Client
 	unregister chan *Client
 	inputs     chan inputMsg
 	game       *game
+
+	// Room identity within the Manager. password is this room's key; pending
+	// counts joins handed out by Manager.acquire but not yet registered, which
+	// guards the room from being reaped mid-join. Both are owned by the Manager
+	// (accessed under its lock). manager is nil in unit tests that drive the game
+	// directly without a room registry.
+	manager  *Manager
+	password string
+	pending  int
 }
 
 func newHub(levels [][]rect, names []string) *Hub {
@@ -42,12 +51,18 @@ func (h *Hub) run() {
 			h.clients[c] = true
 			h.game.addPlayer(c.id)
 			h.sendInit(c)
+			h.manager.registered(h)
 
 		case c := <-h.unregister:
 			if _, ok := h.clients[c]; ok {
 				delete(h.clients, c)
 				close(c.send)
 				h.game.removePlayer(c.id)
+			}
+			// Once the room is empty (and no join is in flight), retire it so
+			// idle rooms don't pile up. reapIfEmpty deletes it from the registry.
+			if h.manager.reapIfEmpty(h) {
+				return
 			}
 
 		case msg := <-h.inputs:
