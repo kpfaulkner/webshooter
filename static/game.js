@@ -215,6 +215,18 @@ let heading = 0;
 let turnAccum = 0; // unprocessed horizontal mouse delta, in pixels
 const TURN_SENSITIVITY = 0.0028; // radians per pixel of mouse movement
 
+// Control scheme, chosen at the join gate. Either:
+//   "turn"      — pointer-locked: mouse motion rotates the heading (the aim IS
+//                 the facing; W/S go forward/back along it, A/D strafe).
+//   "crosshair" — the mouse positions a crosshair in the arena; the turret aims
+//                 at it and W drives toward it (movement is still relative to
+//                 the aim, so the same integrate() math applies to both modes).
+let controlMode = "turn";
+
+// Cursor position in world (= canvas) coordinates, used only in crosshair mode.
+// The arena maps 1:1 onto the canvas, so a canvas point is a world point.
+const cursor = { x: cfg.width / 2, y: cfg.height / 2 };
+
 // --- networking ---
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -317,11 +329,19 @@ function inputTick() {
 
   if (!predicted) return; // wait until we know where we are
 
-  // Integrate accumulated mouse motion into the heading at the fixed timestep.
-  heading += turnAccum * TURN_SENSITIVITY;
-  turnAccum = 0;
+  // Derive the heading for this tick from whichever control scheme is active.
+  if (controlMode === "crosshair") {
+    // Point the turret from our (predicted) position toward the crosshair. If
+    // the cursor sits on top of us, keep the previous heading rather than snap.
+    const dx = cursor.x - predicted.x, dy = cursor.y - predicted.y;
+    if (Math.hypot(dx, dy) > 1) heading = Math.atan2(dy, dx);
+  } else {
+    // Integrate accumulated mouse motion into the heading at the fixed timestep.
+    heading += turnAccum * TURN_SENSITIVITY;
+    turnAccum = 0;
+  }
 
-  // Aim is the unit vector of our heading (driven by mouse turn, not cursor).
+  // Aim is the unit vector of our heading.
   const cmd = {
     seq: ++seq,
     forward: keys.forward,
@@ -414,14 +434,28 @@ window.addEventListener("keyup", (e) => {
 // is required so deltas keep arriving (the cursor never reaches a screen edge).
 const isLocked = () => document.pointerLockElement === canvas;
 
-canvas.addEventListener("mousedown", () => {
+// Map a mouse event's client coordinates to a point in the canvas/world,
+// accounting for any CSS scaling of the canvas element.
+function updateCursor(e) {
+  const rect = canvas.getBoundingClientRect();
+  cursor.x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  cursor.y = (e.clientY - rect.top) * (canvas.height / rect.height);
+}
+
+canvas.addEventListener("mousedown", (e) => {
   initAudio(); // create/resume audio on the user gesture (autoplay policy)
+  if (controlMode === "crosshair") {
+    updateCursor(e); // aim where they clicked, then fire (no pointer lock)
+    keys.fire = true;
+    return;
+  }
   if (isLocked()) keys.fire = true;
   else canvas.requestPointerLock(); // first click grabs the mouse
 });
 window.addEventListener("mouseup", () => { keys.fire = false; });
 
 document.addEventListener("mousemove", (e) => {
+  if (controlMode === "crosshair") { updateCursor(e); return; } // moves the crosshair
   if (isLocked()) turnAccum += e.movementX; // applied in inputTick
 });
 
@@ -526,6 +560,10 @@ function draw() {
 
   drawExplosions();
 
+  // In crosshair mode, draw the aim marker where the mouse points (the OS
+  // cursor is hidden over the canvas so only this shows).
+  if (controlMode === "crosshair") drawCrosshair();
+
   drawScores(snap);
   if (snap) drawClock(snap);
   if (snap && snap.phase === "ended") drawWinOverlay(snap);
@@ -576,6 +614,27 @@ function drawExplosions() {
     }
     ctx.globalAlpha = 1;
   }
+}
+
+// drawCrosshair renders the aim reticle at the cursor: a ring with four ticks
+// and a center dot, in the self color.
+function drawCrosshair() {
+  const x = cursor.x, y = cursor.y;
+  ctx.save();
+  ctx.strokeStyle = "rgba(76, 201, 240, 0.9)";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(x, y, 10, 0, Math.PI * 2);
+  ctx.moveTo(x - 16, y); ctx.lineTo(x - 5, y);
+  ctx.moveTo(x + 5, y); ctx.lineTo(x + 16, y);
+  ctx.moveTo(x, y - 16); ctx.lineTo(x, y - 5);
+  ctx.moveTo(x, y + 5); ctx.lineTo(x, y + 16);
+  ctx.stroke();
+  ctx.fillStyle = "rgba(76, 201, 240, 0.9)";
+  ctx.beginPath();
+  ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawClock(snap) {
@@ -975,11 +1034,27 @@ function lerp(a, b, t) { return a + (b - a) * t; }
 const gate = document.getElementById("gate");
 const gateForm = document.getElementById("gateForm");
 const passwordInput = document.getElementById("password");
+const hint = document.getElementById("hint");
+
+const HINTS = {
+  turn: "click to lock mouse · move mouse to turn · W/S forward/back · A/D strafe · click or space to shoot · Esc to release",
+  crosshair: "move mouse to aim · W drives toward crosshair · S back · A/D strafe · click or space to shoot",
+};
+
 gateForm.addEventListener("submit", (e) => {
   e.preventDefault();
   const pw = passwordInput.value.trim();
   if (!pw) return; // require a password
   gamePassword = pw;
+
+  // Lock in the chosen control scheme before gameplay starts.
+  const chosen = gateForm.querySelector('input[name="control"]:checked');
+  controlMode = chosen ? chosen.value : "turn";
+  hint.textContent = HINTS[controlMode];
+  // Hide the OS cursor in crosshair mode (we draw our own reticle); the pointer
+  // is locked away in turn mode regardless.
+  canvas.style.cursor = controlMode === "crosshair" ? "none" : "pointer";
+
   joined = true;
   gate.classList.add("hidden");
   connect();
